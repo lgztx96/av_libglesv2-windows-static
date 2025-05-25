@@ -1,65 +1,127 @@
-name: build
+name: Build ANGLE static library for Windows
+
 on: [push]
+
 jobs:
-  build:
+  build-angle-windows:
     runs-on: windows-latest
+    strategy:
+      matrix:
+        arch: [x86, x64]
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: ilammy/msvc-dev-cmd@v1
+    - uses: actions/checkout@v4
 
-      - name: Prepare DirectX SDK
-        working-directory: ${{github.workspace}}
-        shell: bash
-        run: |
-          mkdir -p directx && cd $_
-          git init && git remote add origin https://github.com/hrydgard/minidx9
-          git fetch --depth 1 origin master
-          git checkout -q FETCH_HEAD
-          cd Lib/x86
-          rm -rf D3DCSXd.lib d3dx9d.lib d3dx10d.lib d3dx11d.lib xapobased.lib
+    - uses: TheMrMilchmann/setup-msvc-dev@v3
+      with:
+        arch: x64
 
-      - name: Link DirectX SDK
-        working-directory: ${{github.workspace}}
-        shell: cmd
-        run: lib /out:dxstatic.lib directx/Lib/x86/*.lib
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
 
-      - name: Link Windows SDK
-        working-directory: ${{github.workspace}}
-        shell: pwsh
-        run: lib /out:winstatic.lib $env:WindowsSdkDir\Lib\$env:WindowsSDKVersion\um\x86\User32.Lib $env:WindowsSdkDir\Lib\$env:WindowsSDKVersion\um\x86\Gdi32.Lib
+    - name: Set Environment Variable
+      run: echo "DEPOT_TOOLS_WIN_TOOLCHAIN=0" >> $env:GITHUB_ENV
 
-      - name: Build ANGLE
-        working-directory: ${{github.workspace}}
-        shell: pwsh
-        run: vcpkg install angle:x86-windows-static
+    - name: Install depot_tools
+      run: |
+        git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+        echo "$Env:GITHUB_WORKSPACE\depot_tools" >> $Env:GITHUB_PATH
 
-      - name: Export ANGLE
-        working-directory: ${{github.workspace}}
-        shell: pwsh
-        run: vcpkg export angle:x86-windows-static --raw --output-dir=. --output=angle-x86-windows-static
+    - name: Fetch ANGLE (Official External Flow)
+      run: |
+        mkdir angle
+        cd angle
+        fetch angle
 
-      - name: Link ANGLE
-        working-directory: ${{github.workspace}}
-        shell: cmd
-        run: lib /out:libangle.lib angle-x86-windows-static/installed/x86-windows-static/lib/*.lib
+    - name: Modify BUILD.gn to add complete_static_lib = true
+      working-directory: ${{github.workspace}}
+      shell: pwsh
+      
+      run: |
+        cd angle;
+        $path = "BUILD.gn"
+        $lines = Get-Content $path
+        $output = @()
 
-      - name: Link av_libglesv2.lib
-        working-directory: ${{github.workspace}}
-        shell: cmd
-        run: lib /out:av_libglesv2.lib libangle.lib winstatic.lib dxstatic.lib
+        $inBlock = $false
+        foreach ($line in $lines) {
+            if ($line -match 'angle_static_library\("libGLESv2_static"\) {') {
+                $inBlock = $true
+                $output += $line
+                continue
+            }
 
-      - name: Package ANGLE
-        working-directory: ${{github.workspace}}
-        shell: pwsh
-        run: 7z a -y -mx9 av_libglesv2-$env:UCRTVersion.7z ./av_libglesv2.lib
+            if ($inBlock -and $line -match '}') {
+                $output += '  complete_static_lib = true'
+                $inBlock = $false
+            }
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: av_libglesv2-${{env.UCRTVersion}}.7z
-          path: av_libglesv2-${{env.UCRTVersion}}.7z
+            $output += $line
+        }
 
-      - name: Release artifacts
-        uses: softprops/action-gh-release@v1
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          files: av_libglesv2-${{env.UCRTVersion}}.7z
+        $output | Set-Content $path -Encoding UTF8
+
+    - name: Generate Build Files
+      working-directory: ${{ github.workspace }}
+      shell: pwsh
+      run: |
+        cd angle
+        $args = @(
+        'target_os=\"win\"',
+        'target_cpu=\"${{ matrix.arch }}\"',
+        'is_debug=false',
+        'angle_enable_vulkan=false',
+        'angle_enable_d3d9=false',
+        'use_custom_libcxx=false',
+        'is_clang=false',
+        'angle_build_tests=false',
+        'use_cxx17=true',
+        'is_component_build=false',
+        'angle_assert_always_on=false',
+        'angle_enable_null=false',
+        'angle_enable_gl_null=false',
+        'angle_enable_gl=false',
+        'angle_enable_gl_desktop_backend=false',
+         'angle_build_vulkan_system_info=false'
+         'angle_enable_wgpu=false'
+        ) -join ' '
+        gn gen out/windows-${{ matrix.arch }}-static --args="$args"
+
+    - name: Build ANGLE
+      working-directory: ${{github.workspace}}
+      shell: cmd
+      run: |
+        cd angle
+        chcp 65001
+        autoninja -C out/windows-${{ matrix.arch }}-static libGLESv2_static
+        
+    - name: Link ANGLE
+      working-directory: ${{github.workspace}}
+      run: |
+          cd angle/out/windows-${{ matrix.arch }}-static/obj
+          lib /out:av_libglesv2.lib libGLESv2_static.lib `
+          $env:WindowsSdkDir\Lib\$env:WindowsSDKVersion\um\${{ matrix.arch }}\synchronization.lib `
+          $env:WindowsSdkDir\Lib\$env:WindowsSDKVersion\um\${{ matrix.arch }}\Gdi32.lib `
+          $env:WindowsSdkDir\Lib\$env:WindowsSDKVersion\um\${{ matrix.arch }}\d3d11.lib `
+          $env:WindowsSdkDir\Lib\$env:WindowsSDKVersion\um\${{ matrix.arch }}\dxgi.lib `
+          $env:WindowsSdkDir\Lib\$env:WindowsSDKVersion\um\${{ matrix.arch }}\dxguid.lib
+
+    - name: Package ANGLE
+      working-directory: ${{github.workspace}}
+      shell: pwsh
+      run: |
+          cd angle/out/windows-${{ matrix.arch }}-static/obj
+          7z a -y -mx9 av_libglesv2-windows-${{ matrix.arch }}-static-msvc.7z av_libglesv2.lib
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: av_libglesv2-windows-${{ matrix.arch }}-static-msvc.7z
+        path: angle/out/windows-${{ matrix.arch }}-static/obj/av_libglesv2-windows-${{ matrix.arch }}-static-msvc.7z
+
+    - name: Release artifacts
+      uses: softprops/action-gh-release@v1
+      if: startsWith(github.ref, 'refs/tags/')
+      with:
+        files: angle/out/windows-${{ matrix.arch }}-static/obj/av_libglesv2-windows-*-static-msvc.7z
