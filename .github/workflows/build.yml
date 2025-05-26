@@ -91,7 +91,6 @@ jobs:
         $args = @(
         'target_os=\"win\"',
         'target_cpu=\"${{ matrix.arch }}\"',
-        'is_official_build = true',
         'is_debug=false',
         'angle_enable_vulkan=false',
         'angle_enable_d3d9=false',
