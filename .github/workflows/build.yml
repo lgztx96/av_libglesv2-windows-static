@@ -7,8 +7,19 @@ jobs:
     runs-on: windows-latest
     strategy:
       matrix:
-        arch: [x86, x64]
-
+        include:
+          - arch: x86
+            compiler: msvc
+            is_clang: false
+          - arch: x64
+            compiler: msvc
+            is_clang: false
+          - arch: x86
+            compiler: clang
+            is_clang: true
+          - arch: x64
+            compiler: clang
+            is_clang: true
     steps:
     - uses: actions/checkout@v4
 
@@ -63,6 +74,15 @@ jobs:
 
         $output | Set-Content $path -Encoding UTF8
 
+    - name: Create Chrome folder and VERSION file
+      run: |
+        cd angle
+        mkdir -p chrome
+        echo "MAJOR=138" > chrome/VERSION
+        echo "MINOR=0" >> chrome/VERSION
+        echo "BUILD=7203" >> chrome/VERSION
+        echo "PATCH=0" >> chrome/VERSION
+
     - name: Generate Build Files
       working-directory: ${{ github.workspace }}
       shell: pwsh
@@ -71,11 +91,12 @@ jobs:
         $args = @(
         'target_os=\"win\"',
         'target_cpu=\"${{ matrix.arch }}\"',
+        'is_official_build = true',
         'is_debug=false',
         'angle_enable_vulkan=false',
         'angle_enable_d3d9=false',
         'use_custom_libcxx=false',
-        'is_clang=false',
+        'is_clang=${{ matrix.is_clang }}',
         'angle_build_tests=false',
         'use_cxx17=true',
         'is_component_build=false',
@@ -84,8 +105,9 @@ jobs:
         'angle_enable_gl_null=false',
         'angle_enable_gl=false',
         'angle_enable_gl_desktop_backend=false',
-         'angle_build_vulkan_system_info=false'
-         'angle_enable_wgpu=false'
+         'angle_build_vulkan_system_info=false',
+         'angle_enable_wgpu=false',
+         'use_lld=false'
         ) -join ' '
         gn gen out/windows-${{ matrix.arch }}-static --args="$args"
 
@@ -98,30 +120,36 @@ jobs:
         autoninja -C out/windows-${{ matrix.arch }}-static libGLESv2_static
         
     - name: Link ANGLE
-      working-directory: ${{github.workspace}}
+      working-directory: ${{ github.workspace }}
+      shell: pwsh
       run: |
-          cd angle/out/windows-${{ matrix.arch }}-static/obj
+        cd angle/out/windows-${{ matrix.arch }}-static/obj
+        if (${{ matrix.is_clang }}) {
           lib /out:av_libglesv2.lib libGLESv2_static.lib `
-          $env:WindowsSdkDir\Lib\$env:WindowsSDKVersion\um\${{ matrix.arch }}\synchronization.lib `
-          $env:WindowsSdkDir\Lib\$env:WindowsSDKVersion\um\${{ matrix.arch }}\Gdi32.lib `
-          $env:WindowsSdkDir\Lib\$env:WindowsSDKVersion\um\${{ matrix.arch }}\d3d11.lib `
-          $env:WindowsSdkDir\Lib\$env:WindowsSDKVersion\um\${{ matrix.arch }}\dxgi.lib `
-          $env:WindowsSdkDir\Lib\$env:WindowsSDKVersion\um\${{ matrix.arch }}\dxguid.lib
+           $env:WindowsSdkDir\Lib\$env:WindowsSDKVersion\um\${{ matrix.arch }}\dxguid.lib
+        } else {
+            lib /out:av_libglesv2.lib libGLESv2_static.lib `
+            $env:WindowsSdkDir\Lib\$env:WindowsSDKVersion\um\${{ matrix.arch }}\synchronization.lib `
+            $env:WindowsSdkDir\Lib\$env:WindowsSDKVersion\um\${{ matrix.arch }}\Gdi32.lib `
+            $env:WindowsSdkDir\Lib\$env:WindowsSDKVersion\um\${{ matrix.arch }}\d3d11.lib `
+            $env:WindowsSdkDir\Lib\$env:WindowsSDKVersion\um\${{ matrix.arch }}\dxgi.lib `
+            $env:WindowsSdkDir\Lib\$env:WindowsSDKVersion\um\${{ matrix.arch }}\dxguid.lib
+         }
 
     - name: Package ANGLE
       working-directory: ${{github.workspace}}
       shell: pwsh
       run: |
           cd angle/out/windows-${{ matrix.arch }}-static/obj
-          7z a -y -mx9 av_libglesv2-windows-${{ matrix.arch }}-static-msvc.7z av_libglesv2.lib
+          7z a -y -mx9 av_libglesv2-windows-${{ matrix.arch }}-static-${{ matrix.compiler }}.7z av_libglesv2.lib
 
     - uses: actions/upload-artifact@v4
       with:
-        name: av_libglesv2-windows-${{ matrix.arch }}-static-msvc.7z
-        path: angle/out/windows-${{ matrix.arch }}-static/obj/av_libglesv2-windows-${{ matrix.arch }}-static-msvc.7z
+        name: av_libglesv2-windows-${{ matrix.arch }}-static-${{ matrix.compiler }}.7z
+        path: angle/out/windows-${{ matrix.arch }}-static/obj/av_libglesv2-windows-${{ matrix.arch }}-static-${{ matrix.compiler }}.7z
 
     - name: Release artifacts
       uses: softprops/action-gh-release@v1
       if: startsWith(github.ref, 'refs/tags/')
       with:
-        files: angle/out/windows-${{ matrix.arch }}-static/obj/av_libglesv2-windows-*-static-msvc.7z
+        files: angle/out/windows-${{ matrix.arch }}-static/obj/av_libglesv2-windows-${{ matrix.arch }}-static-${{ matrix.compiler }}.7z
